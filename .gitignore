@@ -1,0 +1,36 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Dependencias
+node_modules/
+
+# Builds / dist
+dist/
+build/
+.next/
+.turbo/
+
+# Cobertura / tests
+coverage/
+.nyc_output/
+
+# Configuración local / secretos
+.env
+.env.local
+.env.*.local
+
+# Archivos específicos del proyecto
+processedMails.json
+
+# Sistemas operativos / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+

@@ -1,0 +1,6 @@
+{
+  "prompt": "Analizá el siguiente correo con información de logs o reportes de servidores. El texto que verás incluye asunto, remitente, destinatario, fecha y cuerpo.\n\nRespondé solo con la palabra 'ALERTA' si el mensaje describe un problema importante (errores en base de datos, caídas de servicio, timeouts, errores 5xx, fallos críticos, etc.), o con 'OK' si es normal o solo informativo (por ejemplo alertas de seguridad de Google, activación de 2FA, marketing, etc.).\n\nSolo podés responder 'ALERTA' o 'OK'. Nada más.\n\n---\n{body}",
+  "slackTemplate": ":rotating_light: *Alerta detectada en servidor*\n*Asunto:* {subject}\n*Remitente:* {from}\n*Resumen:* {summary}\n*Fecha:* `{date}`"
+}
+
+

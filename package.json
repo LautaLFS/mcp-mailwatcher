@@ -1,0 +1,19 @@
+{
+  "name": "mcp-mailwatcher",
+  "version": "1.0.0",
+  "description": "MCP server that watches an IMAP mailbox (Exchange or similar), analyses messages with Ollama and sends alerts to Slack.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@slack/web-api": "^7.2.0",
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
+    "ews-javascript-api": "^0.15.3",
+    "imapflow": "^1.0.9",
+    "node-cron": "^3.0.2",
+    "winston": "^3.13.0"
+  }
+}
