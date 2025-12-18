@@ -27,10 +27,10 @@ export async function sendSlackAlert({ subject, from, date, summary }) {
       text,
       mrkdwn: true
     });
-    logger.info(`✅ Slack alert sent for "${subject}"`);
+    logger.info(`✅ Alerta enviada a Slack para "${subject}"`);
   } catch (err) {
-    logger.error(`❌ Slack notification failed: ${err.message}`);
-    // No relanzamos el error para no interrumpir el ciclo IMAP:
+    logger.error(`❌ Falló el envío de la notificación a Slack: ${err.message}`);
+    // No relanzamos el error para no interrumpir el ciclo:
     // el problema queda registrado en logs y se puede revisar el token/config.
   }
 }

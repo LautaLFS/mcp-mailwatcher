@@ -1,4 +1,3 @@
-import * as ews from "ews-javascript-api";
 import { CONFIG } from "./config.js";
 import logger from "./utils/logger.js";
 import fs from "node:fs";
@@ -6,6 +5,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { analyseMessage } from "./messageAnalyzer.js";
 import { sendSlackAlert } from "./slackNotifier.js";
+import httpntlm from "httpntlm";
+import { parseStringPromise } from "xml2js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,14 +32,277 @@ function persistProcessed() {
   );
 }
 
-function createEwsService() {
-  const service = new ews.ExchangeService(ews.ExchangeVersion.Exchange2013);
-  service.Credentials = new ews.ExchangeCredentials(
-    CONFIG.ews.user,
-    CONFIG.ews.pass
+async function callEwsSoap(xmlBody) {
+  const url = CONFIG.ews.url;
+  const { user, pass, domain, workstation } = CONFIG.ews;
+
+  logger.info(
+    `🔑 Configuración EWS NTLM – usuario=${user} dominio=${domain ?? "N/A"} workstation=${workstation ?? "N/A"}`
   );
-  service.Url = new ews.Uri(CONFIG.ews.url);
-  return service;
+
+  return new Promise((resolve, reject) => {
+    httpntlm.post(
+      {
+        url,
+        username: user,
+        password: pass,
+        domain: domain || "",
+        workstation: workstation || "",
+        headers: {
+          "Content-Type": "text/xml; charset=utf-8",
+          Accept: "text/xml",
+          "User-Agent": "NodeNTLMClient"
+        },
+        body: xmlBody,
+        // TLS estricto: el certificado del servidor debe ser válido
+        // para el host de CONFIG.ews.url.
+        strictSSL: true
+      },
+      (err, res) => {
+        if (err) {
+          return reject(err);
+        }
+        if (res.statusCode !== 200) {
+          return reject(
+            new Error(
+              `EWS HTTP ${res.statusCode} ${res.statusMessage || ""}`.trim()
+            )
+          );
+        }
+        resolve(res.body);
+      }
+    );
+  });
+}
+
+async function parseSoap(xml) {
+  return parseStringPromise(xml, {
+    explicitArray: false,
+    ignoreAttrs: false,
+    tagNameProcessors: [
+      // normalizamos nombres de tags quitando prefijos tipo "t:" o "m:"
+      (name) => name.replace(/^[a-zA-Z0-9]+:/, "")
+    ]
+  });
+}
+
+function ensureArray(value) {
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function getText(node) {
+  if (node == null) return "";
+  if (typeof node === "string") return node;
+  if (typeof node._ === "string") return node._;
+  return "";
+}
+
+function formatDateForDisplay(date) {
+  const d =
+    typeof date === "string"
+      ? new Date(date)
+      : date instanceof Date
+        ? date
+        : new Date(date);
+
+  if (!d || Number.isNaN(d.getTime())) {
+    return "";
+  }
+
+  const pad = (n) => String(n).padStart(2, "0");
+  const day = pad(d.getDate());
+  const month = pad(d.getMonth() + 1);
+  const year = d.getFullYear();
+  const hours = pad(d.getHours());
+  const minutes = pad(d.getMinutes());
+  const seconds = pad(d.getSeconds());
+
+  // Formato: DD/MM/YYYY HH:mm:ss (hora local del servidor)
+  return `${day}/${month}/${year} ${hours}:${minutes}:${seconds}`;
+}
+
+async function findUnreadMessages() {
+  const folderId = (CONFIG.mailbox || "INBOX").toLowerCase();
+
+  const findItemSoap = `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+               xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types"
+               xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages">
+  <soap:Header>
+    <t:RequestServerVersion Version="Exchange2010"/>
+  </soap:Header>
+  <soap:Body>
+    <m:FindItem Traversal="Shallow">
+      <m:ItemShape>
+        <t:BaseShape>IdOnly</t:BaseShape>
+        <t:AdditionalProperties>
+          <t:FieldURI FieldURI="item:Subject"/>
+          <t:FieldURI FieldURI="message:From"/>
+          <t:FieldURI FieldURI="message:IsRead"/>
+          <t:FieldURI FieldURI="item:DateTimeReceived"/>
+        </t:AdditionalProperties>
+      </m:ItemShape>
+      <m:IndexedPageItemView MaxEntriesReturned="20" Offset="0" BasePoint="Beginning"/>
+      <m:Restriction>
+        <t:IsEqualTo>
+          <t:FieldURI FieldURI="message:IsRead"/>
+          <t:FieldURIOrConstant>
+            <t:Constant Value="false"/>
+          </t:FieldURIOrConstant>
+        </t:IsEqualTo>
+      </m:Restriction>
+      <m:ParentFolderIds>
+        <t:DistinguishedFolderId Id="${folderId}"/>
+      </m:ParentFolderIds>
+    </m:FindItem>
+  </soap:Body>
+</soap:Envelope>`;
+
+  const raw = await callEwsSoap(findItemSoap);
+  const parsed = await parseSoap(raw);
+
+  const root =
+    parsed?.Envelope?.Body?.FindItemResponse?.ResponseMessages
+      ?.FindItemResponseMessage;
+
+  if (!root) {
+    logger.warn(
+      "No se encontró FindItemResponseMessage en la respuesta de EWS"
+    );
+    return [];
+  }
+
+  const messagesContainer = root.RootFolder?.Items;
+  if (!messagesContainer) {
+    logger.info(
+      "📬 No se encontró contenedor de mensajes en RootFolder de EWS"
+    );
+    return [];
+  }
+
+  const msgs = ensureArray(messagesContainer.Message);
+  logger.info(
+    `📬 EWS devolvió ${msgs.length} mensaje(s) no leído(s) como candidato(s)`
+  );
+
+  return msgs.map((m) => {
+    const id = m.ItemId?.$.Id || m.ItemId?.Id;
+    const changeKey = m.ItemId?.$.ChangeKey || m.ItemId?.ChangeKey;
+    const subject = m.Subject;
+    const fromAddress =
+      m.From?.Mailbox?.EmailAddress || m.From?.Mailbox?.Name || "unknown";
+    const isRead = m.IsRead === true || m.IsRead === "true";
+    const date = m.DateTimeReceived;
+
+    return {
+      id,
+      changeKey,
+      subject,
+      fromAddress,
+      isRead,
+      date
+    };
+  });
+}
+
+async function getMessageDetails(id, changeKey) {
+  const getItemSoap = `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+               xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types"
+               xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages">
+  <soap:Header>
+    <t:RequestServerVersion Version="Exchange2010"/>
+  </soap:Header>
+  <soap:Body>
+    <m:GetItem>
+      <m:ItemShape>
+        <t:BaseShape>IdOnly</t:BaseShape>
+        <t:BodyType>Text</t:BodyType>
+        <t:AdditionalProperties>
+          <t:FieldURI FieldURI="item:Subject"/>
+          <t:FieldURI FieldURI="message:From"/>
+          <t:FieldURI FieldURI="message:ToRecipients"/>
+          <t:FieldURI FieldURI="item:DateTimeReceived"/>
+          <t:FieldURI FieldURI="item:Body"/>
+        </t:AdditionalProperties>
+      </m:ItemShape>
+      <m:ItemIds>
+        <t:ItemId Id="${id}" ChangeKey="${changeKey}"/>
+      </m:ItemIds>
+    </m:GetItem>
+  </soap:Body>
+</soap:Envelope>`;
+
+  const raw = await callEwsSoap(getItemSoap);
+  const parsed = await parseSoap(raw);
+
+  const msg =
+    parsed?.Envelope?.Body?.GetItemResponse?.ResponseMessages
+      ?.GetItemResponseMessage?.Items?.Message;
+
+  if (!msg) {
+    throw new Error("GetItemResponseMessage.Message not found");
+  }
+
+  const subject = msg.Subject;
+  const fromAddress =
+    msg.From?.Mailbox?.EmailAddress || msg.From?.Mailbox?.Name || "unknown";
+
+  const toRecipients = ensureArray(msg.ToRecipients?.Mailbox);
+  const toAddress = toRecipients
+    .map((m) => m.EmailAddress || m.Name)
+    .filter(Boolean)
+    .join(", ") || "unknown";
+
+  const date = msg.DateTimeReceived || msg.DateTimeCreated || new Date();
+  const dateStr = formatDateForDisplay(date);
+
+  const plainBody = getText(msg.Body);
+
+  return {
+    subject,
+    fromAddress,
+    toAddress,
+    dateStr,
+    plainBody
+  };
+}
+
+async function markMessageAsRead(id, changeKey) {
+  const updateSoap = `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+               xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types"
+               xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages">
+  <soap:Header>
+    <t:RequestServerVersion Version="Exchange2010"/>
+  </soap:Header>
+  <soap:Body>
+    <m:UpdateItem MessageDisposition="SaveOnly" ConflictResolution="AutoResolve">
+      <m:ItemChanges>
+        <t:ItemChange>
+          <t:ItemId Id="${id}" ChangeKey="${changeKey}"/>
+          <t:Updates>
+            <t:SetItemField>
+              <t:FieldURI FieldURI="message:IsRead"/>
+              <t:Message>
+                <t:IsRead>true</t:IsRead>
+              </t:Message>
+            </t:SetItemField>
+          </t:Updates>
+        </t:ItemChange>
+      </m:ItemChanges>
+    </m:UpdateItem>
+  </soap:Body>
+</soap:Envelope>`;
+
+  try {
+    await callEwsSoap(updateSoap);
+  } catch (err) {
+    logger.error(
+      `⚠️ Failed to mark message ${id} as read in EWS: ${err.message}`
+    );
+  }
 }
 
 /**
@@ -53,104 +317,112 @@ function createEwsService() {
  *    - marca el mensaje como leído y lo registra en processedMails.json.
  */
 export async function checkMailbox() {
-  const service = createEwsService();
-
   try {
-    logger.info("🔐 Connected to EWS server");
+    logger.info(`🔐 Consultando EWS por NTLM en ${CONFIG.ews.url}`);
 
-    const inbox = await ews.Folder.Bind(
-      service,
-      ews.WellKnownFolderName.Inbox
-    );
+    // 1) Buscar mensajes no leídos en la carpeta configurada
+    const candidates = await findUnreadMessages();
+    logger.info(`📬 EWS encontró ${candidates.length} mensaje(s) no leído(s)`);
 
-    // Recuperamos un número razonable de correos recientes.
-    const view = new ews.ItemView(50);
-    view.Traversal = ews.ItemTraversal.Shallow;
+    for (const meta of candidates) {
+      const { id, changeKey, subject, fromAddress, isRead } = meta;
 
-    const results = await service.FindItems(inbox.Id, view);
-    logger.info(`📬 Found ${results.Items.length} item(s) in Inbox`);
-
-    // Cargar propiedades completas (incluyendo cuerpo) para todos los items encontrados.
-    const propertySet = new ews.PropertySet(
-      ews.BasePropertySet.FirstClassProperties
-    );
-    propertySet.RequestedBodyType = ews.BodyType.Text;
-    await service.LoadPropertiesForItems(results.Items, propertySet);
-
-    for (const item of results.Items) {
-      // Sólo correos no leídos
-      if (item.IsRead) {
+      if (!id) {
         continue;
       }
 
-      const uid = item.Id?.UniqueId;
-      if (uid && processedUids.has(uid)) {
+      if (isRead) {
+        // Por si EWS devolviera algo marcadocomo leído igualmente.
+        continue;
+      }
+
+      if (processedUids.has(id)) {
         // Ya procesado en una ejecución anterior
         continue;
       }
 
-      const subject = item.Subject;
-      const fromAddress = item.From?.Address || "unknown";
-      const toAddress = item.DisplayTo || "unknown";
-      const date = item.DateTimeReceived || item.DateTimeCreated || new Date();
-      const dateStr =
-        typeof date.toISOString === "function"
-          ? date.toISOString()
-          : new Date(date).toISOString();
-
-      const plainBody = item.Body?.Text || "";
-
-      logger.info(
-        `🗒️ Analizando mensaje ${uid ?? "(sin UID)"} – "${subject}" from ${fromAddress} to ${toAddress}`
-      );
-
-      // Armamos un texto enriquecido para el modelo (incluye asunto/remitente)
-      const contentForAnalysis = `Asunto: ${subject ?? ""}\nRemitente: ${fromAddress}\nPara: ${toAddress}\nFecha: ${dateStr}\n\n${plainBody}`;
-
-      // ---- LLM analysis ----
-      let llmAnswer;
+      // 2) Traer detalles completos del mensaje (cuerpo, destinatarios, fecha...)
+      let details;
       try {
-        llmAnswer = await analyseMessage(contentForAnalysis);
-      } catch (e) {
+        details = await getMessageDetails(id, changeKey);
+      } catch (err) {
         logger.error(
-          `⚠️ LLM failed for message ${uid ?? "(sin UID)"}: ${e.message}`
+          `⚠️ No se pudieron obtener los detalles del mensaje (remitente ${fromAddress}): ${err.message}`
         );
-        continue; // se intentará de nuevo en el próximo poll
+        continue;
       }
 
+      const { toAddress, dateStr, plainBody } = details;
+
+      // Log principal: solo remitente y fecha/hora
       logger.info(
-        `🤖 Ollama result for message ${uid ?? "(sin UID)"}: "${llmAnswer}"`
+        `🗒️ Analizando correo de ${fromAddress} recibido ${dateStr}`
       );
 
-      // ---- If ALERTA → Slack ----
-      if (llmAnswer.includes("ALERTA")) {
+      const contentForAnalysis = `Asunto: ${subject ?? ""}\nRemitente: ${
+        fromAddress ?? ""
+      }\nPara: ${toAddress}\nFecha: ${dateStr}\n\n${plainBody}`;
+
+      // 3) Análisis con LLM
+      let analysis;
+      try {
+        analysis = await analyseMessage(contentForAnalysis);
+      } catch (e) {
+        logger.error(
+          `⚠️ LLM failed for message ${id ?? "(sin UID)"}: ${e.message}`
+        );
+        continue;
+      }
+
+      const verdict =
+        typeof analysis === "string" ? analysis : analysis.verdict;
+      const analysisText =
+        typeof analysis === "string" ? "" : analysis.analysisText || "";
+
+      logger.info(
+        `🤖 Resultado de Ollama para correo de ${fromAddress}: "${verdict}"`
+      );
+
+      // 4) Si es ALERTA, enviar a Slack (solo con análisis IA)
+      if (verdict && verdict.includes("ALERTA")) {
         await sendSlackAlert({
           subject,
           from: fromAddress,
           date: dateStr,
-          summary:
-            plainBody.slice(0, 300) + (plainBody.length > 300 ? "…" : "")
+          // Enviamos SOLO el análisis de IA a Slack (sin cuerpo del correo)
+          summary: analysisText || "(sin análisis IA)"
         });
-        logger.info(`🚨 ALERTA enviada a Slack para mensaje ${uid}`);
+        logger.info(
+          `🚨 ALERTA enviada a Slack para correo de ${fromAddress} (${dateStr})`
+        );
       } else {
         logger.info(
-          `✅ Mensaje ${uid ?? "(sin UID)"} considerado OK por el analizador`
+          `✅ Correo de ${fromAddress} (${dateStr}) considerado OK por el analizador`
         );
       }
 
-      // Marcar como leído para no reprocesar en el futuro
-      item.IsRead = true;
-      await item.Update(ews.ConflictResolutionMode.AutoResolve);
-      logger.info(`📖 Mensaje ${uid ?? "(sin UID)"} marcado como leído`);
-
-      // Registrar como procesado
-      if (uid) {
-        processedUids.add(uid);
-        persistProcessed();
-      }
+      // 5) Marcar como leído en EWS y registrar como procesado localmente
+      await markMessageAsRead(id, changeKey);
+      processedUids.add(id);
+      persistProcessed();
     }
   } catch (err) {
-    logger.error(`❌ EWS error: ${err.message}`);
+    const extraParts = [];
+    if (err && typeof err === "object") {
+      if (err.name) extraParts.push(`name=${err.name}`);
+      if (err.code) extraParts.push(`code=${err.code}`);
+      if (err.statusCode) extraParts.push(`statusCode=${err.statusCode}`);
+      if (err.responseCode) extraParts.push(`responseCode=${err.responseCode}`);
+      if (err.innerException?.message) {
+        extraParts.push(`inner=${err.innerException.message}`);
+      }
+    }
+
+    logger.error(
+      `❌ Error al consultar EWS: ${err.message}${
+        extraParts.length ? " | " + extraParts.join(" ") : ""
+      }`
+    );
   }
 }
 

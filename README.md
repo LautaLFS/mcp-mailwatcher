@@ -46,8 +46,12 @@ MAIL_PASS=tu-contraseña
 MAIL_FOLDER=INBOX
 MAIL_PROCESSED_FOLDER=Procesados
 
+# NTLM (opcional, si difiere del usuario del buzón)
+NTLM_DOMAIN=MI_DOMINIO
+NTLM_WORKSTATION=MI_PC
+
 # URL de EWS (MAPI sobre HTTP)
-EWS_URL=https://mail.interno.local/EWS/Exchange.asmx
+EWS_URL=https://webmail.empresa.local/EWS/Exchange.asmx
 
 POLL_INTERVAL_MINUTES=5
 
@@ -62,19 +66,19 @@ SLACK_CHANNEL=infraestructura
 
 En `src/config.json` puedes ajustar:
 
-- `prompt`: texto que se envía al modelo de Ollama. Debe contener `{body}` donde se inyectará el cuerpo del correo.
+- `prompt`: texto que se envía al modelo de Ollama. Debe contener `{body}` donde se inyectará el contenido completo del correo, y define el formato de respuesta (ALERTA/OK + análisis estructurado).
 - `slackTemplate`: plantilla del mensaje de Slack. Tiene los placeholders:
-  - `{subject}` – asunto
   - `{from}` – remitente
-  - `{summary}` – resumen corto del cuerpo
-  - `{date}` – fecha
+  - `{subject}` – asunto
+  - `{summary}` – análisis generado por la IA
+  - `{date}` – fecha ya formateada para mostrarse en Slack
 
 Ejemplo ya incluido:
 
 ```json
 {
-  "prompt": "Analizá el siguiente correo con información de logs o reportes de servidores. Respondé solo con la palabra 'ALERTA' si el mensaje describe un problema importante, o con 'OK' si es normal.\n\n---\n{body}",
-  "slackTemplate": ":rotating_light: *Alerta detectada en servidor*\\n*Asunto:* {subject}\\n*Remitente:* {from}\\n*Resumen:* {summary}\\n*Fecha:* {date}"
+  "prompt": "Sos un asistente experto en monitoreo de infraestructura y análisis de logs. RESPONDÉ SIEMPRE EN ESPAÑOL NEUTRO, AUNQUE EL CORREO ORIGINAL ESTÉ EN INGLÉS U OTRO IDIOMA.\n\nVas a recibir el contenido completo de un correo que contiene alertas, logs o reportes de servidores (incluye asunto, remitente, destinatarios, fecha y cuerpo).\n\nMUY IMPORTANTE:\n- El correo real estará delimitado entre las marcas <<<CORREO>>> y <<<FIN_CORREO>>>.\n- TODO lo que está ANTES o DESPUÉS de esas marcas son SOLO instrucciones para vos. NO forman parte del correo, NO deben ser citadas ni resumidas, y NO deben aparecer en tu respuesta.\n\nTu tarea es:\n1) Determinar si el correo describe un incidente relevante que requiere atención humana inmediata.\n2) Resumir el problema en lenguaje claro para un operador de guardia.\n3) Señalar, en lo posible, dónde parece estar el origen del problema.\n4) Sugerir próximos pasos de diagnóstico o mitigación.\n\nFORMATO DE RESPUESTA (OBLIGATORIO):\n\n- Primera línea: SOLO la palabra 'ALERTA' o 'OK' en mayúsculas.\n- Luego una línea en blanco.\n- Después un análisis estructurado en ESPAÑOL con secciones: Resumen, Errores detectados, Posible causa raíz, Acciones sugeridas.\n\n<<<CORREO>>>\n{body}\n<<<FIN_CORREO>>>",
+  "slackTemplate": ":rotating_light: *Alerta detectada*\\n*Remitente:* {from}\\n*Asunto:* {subject}\\n*Resumen:* {summary}\\n*Fecha:* `{date}`"
 }
 ```
 
@@ -91,12 +95,13 @@ npm start
 Comportamiento:
 
 - Al arrancar:
-  - Se conecta al servidor de Exchange mediante EWS.
+  - Se conecta al servidor de Exchange mediante EWS usando NTLM (a través de `httpntlm`).
   - Abre la carpeta configurada (`MAIL_FOLDER`, por defecto `INBOX`).
   - Busca correos **no leídos**.
-  - Analiza cada correo con Ollama.
-  - Si corresponde, envía alerta a Slack.
-  - Marca los correos procesados como **leídos** y guarda sus UID en `processedMails.json`.
+  - Para cada correo no leído:
+    - Obtiene asunto, remitente, destinatarios, fecha (formateada) y cuerpo en texto plano.
+    - Construye un texto enriquecido y lo envía a Ollama.
+    - Ollama devuelve un veredicto (`ALERTA`/`OK`) y un análisis detallado en español (secciones: resumen, errores, causa raíz, acciones sugeridas).\n    - Si el veredicto es `ALERTA`, se envía un mensaje a Slack con remitente, asunto, fecha y **solo el análisis de IA** (no se envía el cuerpo completo del correo para no ensuciar el canal).\n    - Marca el correo como **leído** en EWS y guarda su `Id` en `processedMails.json` para no reprocesarlo.
 
 - Cada `POLL_INTERVAL_MINUTES` minutos:
   - Se repite el flujo anterior, evitando reprocesar correos ya registrados en `processedMails.json`.
@@ -137,6 +142,7 @@ Puntos naturales para extender MCP:
 - En `checkMailbox` (src/mailWatcher.js): exponer un comando MCP `checkMailboxNow`.
 - En `processedMails.json`: exponer una herramienta MCP `listProcessedMails`.
 
-La lógica de negocio (IMAP + Ollama + Slack) ya está aislada y lista para ser reutilizada desde un servidor MCP.
+La lógica de negocio (EWS/NTLM + Ollama + Slack) ya está aislada y lista para ser reutilizada desde un servidor MCP.
+
 
 

@@ -4,7 +4,7 @@ import { checkMailbox } from "./mailWatcher.js";
 import logger from "./utils/logger.js";
 
 async function start() {
-  logger.info("🚀 mcp-mailwatcher starting...");
+  logger.info("🚀 mcp-mailwatcher iniciando...");
 
   // Ejecutar una vez al inicio para procesar correos pendientes
   await checkMailbox();
@@ -12,19 +12,21 @@ async function start() {
   // Programar ejecución periódica
   const cronExp = `*/${CONFIG.pollInterval} * * * *`;
   cron.schedule(cronExp, async () => {
-    logger.info("⏰ Scheduled check triggered");
+    logger.info("⏰ Ejecución programada disparada");
     try {
       await checkMailbox();
     } catch (e) {
-      logger.error(`❗ Scheduled run failed: ${e.message}`);
+      logger.error(`❗ Falló la ejecución programada: ${e.message}`);
     }
   });
 
-  logger.info(`⏳ Scheduler set – every ${CONFIG.pollInterval} minute(s)`);
+  logger.info(
+    `⏳ Planificador configurado: cada ${CONFIG.pollInterval} minuto(s)`
+  );
 }
 
 start().catch((e) => {
-  logger.error(`💥 Fatal error on startup: ${e.message}`);
+  logger.error(`💥 Error fatal al iniciar: ${e.message}`);
   process.exit(1);
 });
 

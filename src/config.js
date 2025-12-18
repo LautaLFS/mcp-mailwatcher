@@ -32,7 +32,10 @@ export const CONFIG = {
   ews: {
     url: required("EWS_URL"),
     user: process.env.EWS_USER || required("MAIL_USER"),
-    pass: process.env.EWS_PASS || required("MAIL_PASS")
+    pass: process.env.EWS_PASS || required("MAIL_PASS"),
+    // Opcionales: dominio y workstation para NTLM
+    domain: process.env.NTLM_DOMAIN || undefined,
+    workstation: process.env.NTLM_WORKSTATION || undefined
   },
 
   // Carpetas de correo
@@ -60,7 +63,7 @@ export const CONFIG = {
     "Analizá el siguiente correo con información de logs o reportes de servidores. Respondé solo con la palabra 'ALERTA' si el mensaje describe un problema importante, o con 'OK' si es normal.\\n\\n---\\n{body}",
   slackTemplate:
     extraConfig.slackTemplate ||
-    ":rotating_light: *Alerta detectada en servidor*\\n*Asunto:* {subject}\\n*Remitente:* {from}\\n*Resumen:* {summary}\\n*Fecha:* {date}"
+    ":rotating_light: *Alerta detectada*\\n*Asunto:* {subject}\\n*Remitente:* {from}\\n*Resumen:* {summary}\\n*Fecha:* {date}"
 };
 
 

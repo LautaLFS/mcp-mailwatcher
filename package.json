@@ -11,9 +11,9 @@
     "@slack/web-api": "^7.2.0",
     "axios": "^1.7.2",
     "dotenv": "^16.4.5",
-    "ews-javascript-api": "^0.15.3",
-    "imapflow": "^1.0.9",
+    "httpntlm": "^1.8.13",
     "node-cron": "^3.0.2",
-    "winston": "^3.13.0"
+    "winston": "^3.13.0",
+    "xml2js": "^0.6.2"
   }
 }
